@@ -13,10 +13,10 @@ export function makeSeedData(): AppData {
         email: 'emily@shouldertap.dev',
         headline: 'Full-stack Software Engineer',
         location: 'Portsmouth, NH',
-        bio: 'I like building things end to end — from schema to pixels. Happiest on small, scrappy teams shipping something real. Looking to lend a hand on hardware or climate projects.',
+        bio: 'I like building things end to end. From schema to pixels. Happiest on small, scrappy teams shipping something real. Looking to lend a hand on hardware or climate projects.',
         skills: ['Software Engineering', 'TypeScript', 'React', 'Node.js', 'UI Design'],
         interests: ['Climate Tech', 'Hardware', 'Open Source', 'Trail Running'],
-        school: 'University of New Hampshire — BS Computer Science',
+        school: 'University of New Hampshire: BS Computer Science',
         hue: 16,
       },
       {
@@ -40,7 +40,7 @@ export function makeSeedData(): AppData {
         bio: 'Firmware, PCBs, and anything with a microcontroller in it. I have bricked more dev boards than I can count and learned something every time.',
         skills: ['Embedded Systems', 'Electrical Engineering', 'C/C++', 'PCB Design', 'RTOS'],
         interests: ['Open Source', 'Ham Radio', 'Outdoors'],
-        school: 'UT Austin — MS Electrical & Computer Engineering',
+        school: 'UT Austin: MS Electrical & Computer Engineering',
         hue: 280,
       },
       {
@@ -52,7 +52,7 @@ export function makeSeedData(): AppData {
         bio: 'I design objects people actually want to live with. Strong opinions about radii. Open to collaborating on hardware that deserves a beautiful enclosure.',
         skills: ['Industrial Design', 'UI Design', 'Figma', 'Rendering', 'User Research'],
         interests: ['Art & Design', 'Ceramics', 'Sustainable Materials'],
-        school: 'Pratt Institute — BID Industrial Design',
+        school: 'Pratt Institute: BID Industrial Design',
         hue: 330,
       },
       {
@@ -64,7 +64,7 @@ export function makeSeedData(): AppData {
         bio: 'I build models that run on real hardware with real constraints. Previously speech recognition at a big company; now I want to work on things I can point at.',
         skills: ['Machine Learning', 'Python', 'Computer Vision', 'Software Engineering', 'Edge AI'],
         interests: ['Edge AI', 'Privacy', 'Hiking'],
-        school: 'University of Washington — PhD Computer Science',
+        school: 'University of Washington: PhD Computer Science',
         hue: 150,
       },
       {
@@ -76,7 +76,7 @@ export function makeSeedData(): AppData {
         bio: 'Bridges, foundations, and load paths. I volunteer with disaster-relief rebuilds and want to bring structural rigor to community projects.',
         skills: ['Civil Engineering', 'Structural Analysis', 'AutoCAD', 'Project Management'],
         interests: ['Disaster Relief', 'Civic Tech'],
-        school: 'Northwestern University — MS Civil Engineering',
+        school: 'Northwestern University: MS Civil Engineering',
         hue: 45,
       },
       {
@@ -98,7 +98,7 @@ export function makeSeedData(): AppData {
         location: 'Denver, CO',
         bio: 'I help technical teams explain what they built and find the people who need it. Words, launches, and landing pages.',
         skills: ['Marketing', 'Copywriting', 'Branding', 'Community Building'],
-        school: 'Colorado State University — BA Journalism',
+        school: 'Colorado State University: BA Journalism',
         hue: 95,
       },
       {
