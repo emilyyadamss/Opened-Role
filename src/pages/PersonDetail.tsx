@@ -3,11 +3,12 @@ import { Link, useParams } from 'react-router-dom'
 import { useStore } from '../store'
 import { INTEREST_SUGGESTIONS, SKILL_SUGGESTIONS } from '../data/seed'
 import type { Resume } from '../types'
+import { resumeDownloadUrl, uploadResume } from '../lib/resume'
 import { Avatar, EmptyState, Modal } from '../components/ui'
 import { ProjectCard } from '../components/ProjectCard'
 
-/** Resumes live in localStorage as data URLs, so keep uploads small. */
-const MAX_RESUME_BYTES = 2 * 1024 * 1024
+/** Resumes upload to Supabase Storage; the bucket comfortably holds larger files. */
+const MAX_RESUME_BYTES = 10 * 1024 * 1024
 
 export function PersonDetail() {
   const { id } = useParams()
@@ -32,6 +33,15 @@ export function PersonDetail() {
   const contributions = data.projects.filter(
     (p) => p.ownerId !== user.id && p.roles.some((r) => r.filledBy.includes(user.id)),
   )
+
+  async function openResume(resume: Resume) {
+    try {
+      const url = await resumeDownloadUrl(resume)
+      window.open(url, '_blank', 'noopener,noreferrer')
+    } catch {
+      notify('Could not open that resume. Please try again.', 'info')
+    }
+  }
 
   return (
     <div className="container" style={{ maxWidth: 980 }}>
@@ -83,9 +93,9 @@ export function PersonDetail() {
           )}
           {user.resume && (
             <div style={{ marginTop: 18 }}>
-              <a className="btn btn-ghost btn-sm" href={user.resume.dataUrl} download={user.resume.fileName}>
+              <button className="btn btn-ghost btn-sm" onClick={() => openResume(user.resume!)}>
                 Resume — {user.resume.fileName}
-              </a>
+              </button>
             </div>
           )}
         </div>
@@ -136,6 +146,7 @@ export function PersonDetail() {
     const [customInterest, setCustomInterest] = useState('')
     const [resume, setResume] = useState<Resume | undefined>(currentUser.resume)
     const [resumeError, setResumeError] = useState('')
+    const [uploading, setUploading] = useState(false)
 
     function addCustomInterest() {
       const value = customInterest.trim()
@@ -146,19 +157,23 @@ export function PersonDetail() {
       setCustomInterest('')
     }
 
-    function onResumeFile(e: ChangeEvent<HTMLInputElement>) {
+    async function onResumeFile(e: ChangeEvent<HTMLInputElement>) {
       const file = e.target.files?.[0]
       e.target.value = ''
       if (!file) return
       if (file.size > MAX_RESUME_BYTES) {
-        setResumeError('That file is over 2 MB. Profiles are stored in your browser, so please upload a smaller file.')
+        setResumeError('That file is over 10 MB. Please upload a smaller file.')
         return
       }
       setResumeError('')
-      const reader = new FileReader()
-      reader.onload = () =>
-        setResume({ fileName: file.name, dataUrl: reader.result as string, uploadedAt: Date.now() })
-      reader.readAsDataURL(file)
+      setUploading(true)
+      try {
+        setResume(await uploadResume(currentUser.id, file))
+      } catch {
+        setResumeError('Upload failed. Please try again.')
+      } finally {
+        setUploading(false)
+      }
     }
 
     return (
@@ -243,16 +258,22 @@ export function PersonDetail() {
           <label>Resume</label>
           {resume ? (
             <div className="resume-row">
-              <a href={resume.dataUrl} download={resume.fileName}>
+              <button type="button" className="link-btn" onClick={() => openResume(resume)}>
                 {resume.fileName}
-              </a>
+              </button>
               <button type="button" className="link-btn" onClick={() => setResume(undefined)}>
                 Remove
               </button>
             </div>
           ) : (
-            <input type="file" accept=".pdf,.doc,.docx,.txt,.md" onChange={onResumeFile} />
+            <input
+              type="file"
+              accept=".pdf,.doc,.docx,.txt,.md"
+              onChange={onResumeFile}
+              disabled={uploading}
+            />
           )}
+          {uploading && <p className="hint">Uploading…</p>}
           {resumeError && <p className="hint" style={{ color: 'var(--accent)' }}>{resumeError}</p>}
         </div>
         <div className="modal-actions">

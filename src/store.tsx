@@ -8,21 +8,19 @@ import {
   useState,
   type ReactNode,
 } from 'react'
-import type { AppData, Application, ApplicationStatus, Project, ToolListing, User } from './types'
-import { makeSeedData } from './data/seed'
+import type { AppData, Application, ApplicationStatus, Project, Role, ToolListing, User } from './types'
+import { supabase } from './lib/supabase'
+import { DEMO_PASSWORD } from './lib/constants'
 
-const STORAGE_KEY = 'opened-role-data-v1'
-const AUTH_KEY = 'opened-role-auth-v1'
+export { DEMO_PASSWORD }
 
-/**
- * Demo password shared by every seeded account. There is no backend, so this
- * stands in for a real credential check — see the hint on the login page.
- */
-export const DEMO_PASSWORD = 'openedrole'
+export type SignInResult = { ok: true; message?: string } | { ok: false; error: string }
 
-export type SignInResult =
-  | { ok: true; user: User }
-  | { ok: false; error: string }
+export interface SignUpParams {
+  email: string
+  password: string
+  name: string
+}
 
 export interface Toast {
   id: string
@@ -30,14 +28,17 @@ export interface Toast {
   message: string
 }
 
+export type Status = 'loading' | 'ready' | 'signedout'
+
 interface Store {
   data: AppData
   currentUser: User
   authedUserId: string | null
+  status: Status
   toasts: Toast[]
-  signIn: (email: string, password: string) => SignInResult
-  completeSignIn: (userId: string) => void
-  signOut: () => void
+  signIn: (email: string, password: string) => Promise<SignInResult>
+  signUp: (params: SignUpParams) => Promise<SignInResult>
+  signOut: () => Promise<void>
   dismissToast: (id: string) => void
   notify: (message: string, kind?: Toast['kind']) => void
   addProject: (p: Omit<Project, 'id' | 'ownerId' | 'createdAt' | 'hue'>) => Project
@@ -51,72 +52,16 @@ interface Store {
       Pick<User, 'name' | 'headline' | 'location' | 'bio' | 'skills' | 'interests' | 'school' | 'resume'>
     >,
   ) => void
-  resetData: () => void
 }
 
 const StoreContext = createContext<Store | null>(null)
 
-function loadData(): AppData {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw) return migrate(JSON.parse(raw) as AppData)
-  } catch {
-    // fall through to seed
-  }
-  return makeSeedData()
-}
-
-/**
- * Backfill fields added after a user's data was first seeded into localStorage.
- * Without this, accounts stored before the `email` field existed have no email,
- * and sign-in would throw on `u.email.toLowerCase()`.
- */
-function migrate(data: AppData): AppData {
-  const seed = makeSeedData()
-  const seedEmailById = new Map(seed.users.map((u) => [u.id, u.email]))
-  let changed = false
-  let users = data.users.map((u) => {
-    if (u.email) return u
-    changed = true
-    const fallback = `${u.name.split(' ')[0].toLowerCase()}@openedrole.dev`
-    return { ...u, email: seedEmailById.get(u.id) ?? fallback }
-  })
-  let projects = data.projects.map((p) => {
-    if (p.roles.every((r) => r.workMode)) return p
-    changed = true
-    return {
-      ...p,
-      roles: p.roles.map((r) => (r.workMode ? r : { ...r, workMode: 'remote' as const })),
-    }
-  })
-  // Seed entities introduced after this data was first stored.
-  const userIds = new Set(users.map((u) => u.id))
-  const newUsers = seed.users.filter((u) => !userIds.has(u.id))
-  const projectIds = new Set(projects.map((p) => p.id))
-  const newProjects = seed.projects.filter((p) => !projectIds.has(p.id))
-  if (newUsers.length > 0) {
-    users = [...users, ...newUsers]
-    changed = true
-  }
-  if (newProjects.length > 0) {
-    projects = [...projects, ...newProjects]
-    changed = true
-  }
-  // Tool sharing shipped after launch; older stored data has no `tools` array.
-  let tools = data.tools
-  if (!tools) {
-    tools = seed.tools
-    changed = true
-  }
-  return changed ? { ...data, users, projects, tools } : data
-}
-
-function loadAuth(): string | null {
-  try {
-    return localStorage.getItem(AUTH_KEY)
-  } catch {
-    return null
-  }
+const EMPTY_DATA: AppData = {
+  currentUserId: '',
+  users: [],
+  projects: [],
+  applications: [],
+  tools: [],
 }
 
 let idCounter = 0
@@ -125,28 +70,124 @@ export function uid(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${idCounter}`
 }
 
+// --- Row → app-model mapping -------------------------------------------------
+
+type Row = Record<string, any>
+
+function rowToUser(r: Row): User {
+  return {
+    id: r.id,
+    name: r.name ?? '',
+    email: r.email ?? '',
+    headline: r.headline ?? '',
+    location: r.location ?? '',
+    bio: r.bio ?? '',
+    skills: r.skills ?? [],
+    interests: r.interests ?? undefined,
+    school: r.school ?? undefined,
+    resume: r.resume ?? undefined,
+    hue: r.hue ?? 210,
+  }
+}
+
+function rowToRole(r: Row): Role {
+  return {
+    id: r.id,
+    title: r.title,
+    description: r.description ?? '',
+    skills: r.skills ?? [],
+    slots: r.slots ?? 1,
+    filledBy: r.filled_by ?? [],
+    workMode: r.work_mode ?? 'remote',
+  }
+}
+
+function rowToTool(r: Row): ToolListing {
+  return {
+    id: r.id,
+    ownerId: r.owner_id,
+    name: r.name,
+    category: r.category,
+    description: r.description ?? '',
+    ratePerDay: Number(r.rate_per_day ?? 0),
+    createdAt: Date.parse(r.created_at),
+  }
+}
+
+function rowToApplication(r: Row): Application {
+  return {
+    id: r.id,
+    projectId: r.project_id,
+    roleId: r.role_id,
+    userId: r.user_id,
+    message: r.message ?? '',
+    status: r.status,
+    createdAt: Date.parse(r.created_at),
+  }
+}
+
+function assembleProjects(projectRows: Row[], roleRows: Row[]): Project[] {
+  const rolesByProject = new Map<string, Row[]>()
+  for (const r of roleRows) {
+    const list = rolesByProject.get(r.project_id) ?? []
+    list.push(r)
+    rolesByProject.set(r.project_id, list)
+  }
+  return projectRows.map((p) => ({
+    id: p.id,
+    ownerId: p.owner_id,
+    title: p.title,
+    tagline: p.tagline,
+    description: p.description,
+    category: p.category,
+    tags: p.tags ?? [],
+    roles: (rolesByProject.get(p.id) ?? [])
+      .sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
+      .map(rowToRole),
+    createdAt: Date.parse(p.created_at),
+    hue: p.hue ?? 210,
+  }))
+}
+
+async function fetchAll(): Promise<Omit<AppData, 'currentUserId'>> {
+  const [profiles, projects, roles, applications, tools] = await Promise.all([
+    supabase.from('profiles').select('*'),
+    supabase.from('projects').select('*'),
+    supabase.from('roles').select('*'),
+    supabase.from('applications').select('*'),
+    supabase.from('tools').select('*'),
+  ])
+  const firstError =
+    profiles.error || projects.error || roles.error || applications.error || tools.error
+  if (firstError) throw firstError
+
+  return {
+    users: (profiles.data ?? []).map(rowToUser),
+    projects: assembleProjects(projects.data ?? [], roles.data ?? []),
+    applications: (applications.data ?? []).map(rowToApplication),
+    tools: (tools.data ?? []).map(rowToTool),
+  }
+}
+
+function friendlyAuthError(message: string): string {
+  if (/invalid login credentials/i.test(message)) {
+    return 'That email and password don’t match an account.'
+  }
+  return message
+}
+
 export function StoreProvider({ children }: { children: ReactNode }) {
-  const [data, setData] = useState<AppData>(loadData)
-  const [authedUserId, setAuthedUserId] = useState<string | null>(loadAuth)
+  const [data, setData] = useState<AppData>(EMPTY_DATA)
+  const [authedUserId, setAuthedUserId] = useState<string | null>(null)
+  const [status, setStatus] = useState<Status>('loading')
   const [toasts, setToasts] = useState<Toast[]>([])
   const timersRef = useRef<number[]>([])
 
-  const authedUserIdRef = useRef(authedUserId)
-  authedUserIdRef.current = authedUserId
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
-  }, [data])
-
-  useEffect(() => {
-    if (authedUserId) localStorage.setItem(AUTH_KEY, authedUserId)
-    else localStorage.removeItem(AUTH_KEY)
-  }, [authedUserId])
-
-  useEffect(() => {
-    const timers = timersRef.current
-    return () => timers.forEach((t) => window.clearTimeout(t))
-  }, [])
+  // Refs so mutation callbacks can stay identity-stable (empty dep arrays).
+  const dataRef = useRef(data)
+  dataRef.current = data
+  const currentUserIdRef = useRef(data.currentUserId)
+  currentUserIdRef.current = data.currentUserId
 
   const dismissToast = useCallback((id: string) => {
     setToasts((ts) => ts.filter((t) => t.id !== id))
@@ -161,87 +202,251 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [dismissToast],
   )
 
-  const currentUserIdRef = useRef(data.currentUserId)
-  currentUserIdRef.current = data.currentUserId
+  // Re-pull everything from the server (used after a failed write, and by realtime).
+  const resync = useCallback(() => {
+    fetchAll()
+      .then((fresh) => setData((d) => ({ ...d, ...fresh })))
+      .catch(() => {
+        /* transient — realtime or the next action will retry */
+      })
+  }, [])
+
+  // Run a write; on failure, surface a message and resync to the truth.
+  const commit = useCallback(
+    (promise: PromiseLike<{ error: unknown }>, failMessage: string) => {
+      Promise.resolve(promise).then(({ error }) => {
+        if (error) {
+          notify(failMessage, 'info')
+          resync()
+        }
+      })
+    },
+    [notify, resync],
+  )
+
+  // --- Auth + initial load ---------------------------------------------------
+
+  useEffect(() => {
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session) {
+        setAuthedUserId(session.user.id)
+        // Defer: doing Supabase calls synchronously inside this callback can deadlock.
+        setTimeout(() => {
+          fetchAll()
+            .then((fresh) => {
+              setData({ currentUserId: session.user.id, ...fresh })
+              setStatus('ready')
+            })
+            .catch(() => {
+              setData({ ...EMPTY_DATA, currentUserId: session.user.id })
+              setStatus('ready')
+              notify('Could not load your data. Check your connection and refresh.', 'info')
+            })
+        }, 0)
+      } else {
+        setAuthedUserId(null)
+        setData(EMPTY_DATA)
+        setStatus('signedout')
+      }
+    })
+    return () => sub.subscription.unsubscribe()
+  }, [notify])
+
+  // --- Realtime: keep every open browser in sync -----------------------------
+
+  useEffect(() => {
+    if (!authedUserId) return
+    let debounce: number | undefined
+    const channel = supabase
+      .channel('opened-role-changes')
+      .on('postgres_changes', { event: '*', schema: 'public' }, () => {
+        window.clearTimeout(debounce)
+        debounce = window.setTimeout(resync, 400)
+      })
+      .subscribe()
+    return () => {
+      window.clearTimeout(debounce)
+      supabase.removeChannel(channel)
+    }
+  }, [authedUserId, resync])
+
+  useEffect(() => {
+    const timers = timersRef.current
+    return () => timers.forEach((t) => window.clearTimeout(t))
+  }, [])
+
+  // --- Mutations (optimistic local update + background write) ----------------
 
   const addProject = useCallback(
     (p: Omit<Project, 'id' | 'ownerId' | 'createdAt' | 'hue'>) => {
+      const id = uid('p')
+      const ownerId = currentUserIdRef.current
       const project: Project = {
         ...p,
-        id: uid('p'),
-        ownerId: currentUserIdRef.current,
+        id,
+        ownerId,
         createdAt: Date.now(),
         hue: Math.floor(Math.random() * 360),
       }
       setData((d) => ({ ...d, projects: [project, ...d.projects] }))
+
+      Promise.resolve(
+        supabase.from('projects').insert({
+          id,
+          owner_id: ownerId,
+          title: project.title,
+          tagline: project.tagline,
+          description: project.description,
+          category: project.category,
+          tags: project.tags,
+          hue: project.hue,
+        }),
+      ).then(({ error }) => {
+        if (error) {
+          notify('Could not save your project.', 'info')
+          resync()
+          return
+        }
+        const roleRows = project.roles.map((r, i) => ({
+          id: r.id,
+          project_id: id,
+          title: r.title,
+          description: r.description,
+          skills: r.skills,
+          slots: r.slots,
+          filled_by: r.filledBy,
+          work_mode: r.workMode,
+          position: i,
+        }))
+        commit(supabase.from('roles').insert(roleRows), 'Could not save the project’s roles.')
+      })
+
       return project
     },
-    [],
+    [notify, resync, commit],
   )
 
-  const addTool = useCallback((t: Omit<ToolListing, 'id' | 'ownerId' | 'createdAt'>) => {
-    setData((d) => {
-      const tool: ToolListing = {
-        ...t,
-        id: uid('t'),
-        ownerId: d.currentUserId,
-        createdAt: Date.now(),
-      }
-      return { ...d, tools: [tool, ...d.tools] }
-    })
-  }, [])
+  const addTool = useCallback(
+    (t: Omit<ToolListing, 'id' | 'ownerId' | 'createdAt'>) => {
+      const id = uid('t')
+      const ownerId = currentUserIdRef.current
+      const tool: ToolListing = { ...t, id, ownerId, createdAt: Date.now() }
+      setData((d) => ({ ...d, tools: [tool, ...d.tools] }))
+      commit(
+        supabase.from('tools').insert({
+          id,
+          owner_id: ownerId,
+          name: tool.name,
+          category: tool.category,
+          description: tool.description,
+          rate_per_day: tool.ratePerDay,
+        }),
+        'Could not list your tool.',
+      )
+    },
+    [commit],
+  )
 
-  const removeTool = useCallback((toolId: string) => {
-    setData((d) => ({ ...d, tools: d.tools.filter((t) => t.id !== toolId) }))
-  }, [])
+  const removeTool = useCallback(
+    (toolId: string) => {
+      setData((d) => ({ ...d, tools: d.tools.filter((t) => t.id !== toolId) }))
+      commit(supabase.from('tools').delete().eq('id', toolId), 'Could not remove the listing.')
+    },
+    [commit],
+  )
 
-  const apply = useCallback((projectId: string, roleId: string, message: string) => {
-    setData((d) => {
+  const apply = useCallback(
+    (projectId: string, roleId: string, message: string) => {
+      const id = uid('a')
+      const userId = currentUserIdRef.current
       const application: Application = {
-        id: uid('a'),
+        id,
         projectId,
         roleId,
-        userId: d.currentUserId,
+        userId,
         message,
         status: 'pending',
         createdAt: Date.now(),
       }
-      return { ...d, applications: [application, ...d.applications] }
-    })
-  }, [])
-
-  const withdraw = useCallback((applicationId: string) => {
-    setData((d) => ({
-      ...d,
-      applications: d.applications.filter((a) => a.id !== applicationId),
-    }))
-  }, [])
-
-  const decideApplication = useCallback((applicationId: string, status: ApplicationStatus) => {
-    setData((d) => {
-      const app = d.applications.find((a) => a.id === applicationId)
-      if (!app) return d
-      const applications = d.applications.map((a) =>
-        a.id === applicationId ? { ...a, status } : a,
+      setData((d) => ({ ...d, applications: [application, ...d.applications] }))
+      commit(
+        supabase
+          .from('applications')
+          .insert({ id, project_id: projectId, role_id: roleId, user_id: userId, message, status: 'pending' }),
+        'Could not send your application.',
       )
-      let projects = d.projects
-      if (status === 'accepted') {
-        projects = d.projects.map((p) =>
-          p.id === app.projectId
-            ? {
-                ...p,
-                roles: p.roles.map((r) =>
-                  r.id === app.roleId && !r.filledBy.includes(app.userId)
-                    ? { ...r, filledBy: [...r.filledBy, app.userId] }
-                    : r,
-                ),
-              }
-            : p,
+    },
+    [commit],
+  )
+
+  const withdraw = useCallback(
+    (applicationId: string) => {
+      setData((d) => ({
+        ...d,
+        applications: d.applications.filter((a) => a.id !== applicationId),
+      }))
+      commit(
+        supabase.from('applications').delete().eq('id', applicationId),
+        'Could not withdraw the application.',
+      )
+    },
+    [commit],
+  )
+
+  const decideApplication = useCallback(
+    (applicationId: string, status: ApplicationStatus) => {
+      const d0 = dataRef.current
+      const app = d0.applications.find((a) => a.id === applicationId)
+      if (!app) return
+
+      // Decide up front whether accepting this fills a slot, so the background
+      // write below doesn't depend on when React runs the state updater.
+      const role = d0.projects
+        .find((p) => p.id === app.projectId)
+        ?.roles.find((r) => r.id === app.roleId)
+      const nextFilledBy =
+        status === 'accepted' && role && !role.filledBy.includes(app.userId)
+          ? [...role.filledBy, app.userId]
+          : null
+
+      // Optimistic: set status and, if accepted, fill the role slot.
+      setData((d) => {
+        const applications = d.applications.map((a) =>
+          a.id === applicationId ? { ...a, status } : a,
         )
-      }
-      return { ...d, applications, projects }
-    })
-  }, [])
+        const projects = nextFilledBy
+          ? d.projects.map((p) =>
+              p.id === app.projectId
+                ? {
+                    ...p,
+                    roles: p.roles.map((r) =>
+                      r.id === app.roleId ? { ...r, filledBy: nextFilledBy } : r,
+                    ),
+                  }
+                : p,
+            )
+          : d.projects
+        return { ...d, applications, projects }
+      })
+
+      Promise.resolve(supabase.from('applications').update({ status }).eq('id', applicationId)).then(
+        ({ error }) => {
+          if (error) {
+            notify('Could not update the application.', 'info')
+            resync()
+            return
+          }
+          if (status === 'accepted' && nextFilledBy) {
+            commit(
+              supabase.from('roles').update({ filled_by: nextFilledBy }).eq('id', app.roleId),
+              'Could not fill the role.',
+            )
+          }
+        },
+      )
+    },
+    [notify, resync, commit],
+  )
 
   const updateProfile = useCallback(
     (
@@ -249,45 +454,64 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         Pick<User, 'name' | 'headline' | 'location' | 'bio' | 'skills' | 'interests' | 'school' | 'resume'>
       >,
     ) => {
+      const id = currentUserIdRef.current
       setData((d) => ({
         ...d,
-        users: d.users.map((u) => (u.id === d.currentUserId ? { ...u, ...patch } : u)),
+        users: d.users.map((u) => (u.id === id ? { ...u, ...patch } : u)),
       }))
+
+      const row: Row = {}
+      if ('name' in patch) row.name = patch.name
+      if ('headline' in patch) row.headline = patch.headline
+      if ('location' in patch) row.location = patch.location
+      if ('bio' in patch) row.bio = patch.bio
+      if ('skills' in patch) row.skills = patch.skills
+      if ('interests' in patch) row.interests = patch.interests ?? []
+      if ('school' in patch) row.school = patch.school ?? null
+      if ('resume' in patch) row.resume = patch.resume ?? null
+      commit(supabase.from('profiles').update(row).eq('id', id), 'Could not save your profile.')
     },
-    [],
+    [commit],
   )
 
-  const signIn = useCallback(
-    (email: string, password: string): SignInResult => {
-      const normalized = email.trim().toLowerCase()
-      const user = data.users.find((u) => u.email?.toLowerCase() === normalized)
-      if (!user || password !== DEMO_PASSWORD) {
-        return { ok: false, error: 'That email and password don’t match an account.' }
-      }
-      return { ok: true, user }
-    },
-    [data.users],
-  )
+  // --- Auth actions ----------------------------------------------------------
 
-  const completeSignIn = useCallback((userId: string) => {
-    setAuthedUserId(userId)
-    setData((d) => ({ ...d, currentUserId: userId }))
+  const signIn = useCallback(async (email: string, password: string): Promise<SignInResult> => {
+    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password })
+    if (error) return { ok: false, error: friendlyAuthError(error.message) }
+    return { ok: true }
   }, [])
 
-  const signOut = useCallback(() => {
-    setAuthedUserId(null)
-  }, [])
-
-  const resetData = useCallback(() => {
-    setData(() => {
-      const seed = makeSeedData()
-      const authed = authedUserIdRef.current
-      return authed ? { ...seed, currentUserId: authed } : seed
+  const signUp = useCallback(async ({ email, password, name }: SignUpParams): Promise<SignInResult> => {
+    const { data: res, error } = await supabase.auth.signUp({
+      email: email.trim(),
+      password,
+      options: { data: { name: name.trim() } },
     })
+    if (error) return { ok: false, error: error.message }
+    if (!res.session) {
+      // Email confirmation is on — no session until they click the link.
+      return { ok: true, message: 'Check your email to confirm your account, then sign in.' }
+    }
+    return { ok: true }
   }, [])
 
-  const currentUser = useMemo(
-    () => data.users.find((u) => u.id === data.currentUserId)!,
+  const signOut = useCallback(async () => {
+    await supabase.auth.signOut()
+  }, [])
+
+  const currentUser = useMemo<User>(
+    () =>
+      data.users.find((u) => u.id === data.currentUserId) ?? {
+        id: data.currentUserId,
+        name: '',
+        email: '',
+        headline: '',
+        location: '',
+        bio: '',
+        skills: [],
+        hue: 210,
+      },
     [data.users, data.currentUserId],
   )
 
@@ -296,9 +520,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       data,
       currentUser,
       authedUserId,
+      status,
       toasts,
       signIn,
-      completeSignIn,
+      signUp,
       signOut,
       dismissToast,
       notify,
@@ -309,15 +534,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       withdraw,
       decideApplication,
       updateProfile,
-      resetData,
     }),
     [
       data,
       currentUser,
       authedUserId,
+      status,
       toasts,
       signIn,
-      completeSignIn,
+      signUp,
       signOut,
       dismissToast,
       notify,
@@ -328,7 +553,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       withdraw,
       decideApplication,
       updateProfile,
-      resetData,
     ],
   )
 

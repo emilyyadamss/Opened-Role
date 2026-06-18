@@ -12,10 +12,11 @@ export interface User {
   hue: number
 }
 
-/** An uploaded resume, stored inline as a data URL since there is no backend. */
+/** An uploaded resume. The file lives in the `resumes` Storage bucket; we keep
+ *  its object path here and mint a short-lived signed URL when someone opens it. */
 export interface Resume {
   fileName: string
-  dataUrl: string
+  path: string
   uploadedAt: number
 }
 

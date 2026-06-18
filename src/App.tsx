@@ -13,21 +13,27 @@ import { Dashboard } from './pages/Dashboard'
 import { Login } from './pages/Login'
 
 function Footer() {
-  const { resetData, notify } = useStore()
   return (
     <div className="container">
       <footer className="footer">
         <span>Opened Role Project. Find the missing person for your projects success.</span>
-        <button
-          className="link-btn"
-          onClick={() => {
-            resetData()
-            notify('Demo data reset', 'info')
-          }}
-        >
-          Reset demo data
-        </button>
       </footer>
+    </div>
+  )
+}
+
+function Splash() {
+  return (
+    <div className="auth-page">
+      <div className="auth-card" style={{ textAlign: 'center' }}>
+        <div className="auth-brand" style={{ justifyContent: 'center' }}>
+          <span className="brand-mark" aria-hidden="true" />
+          Opened Role
+        </div>
+        <p className="muted" style={{ marginTop: 18 }}>
+          Loading…
+        </p>
+      </div>
     </div>
   )
 }
@@ -59,7 +65,15 @@ function Pages() {
 }
 
 function Authenticated() {
-  const { authedUserId } = useStore()
+  const { status, authedUserId } = useStore()
+  if (status === 'loading') {
+    return (
+      <>
+        <Splash />
+        <Toasts />
+      </>
+    )
+  }
   if (!authedUserId) {
     return (
       <>
